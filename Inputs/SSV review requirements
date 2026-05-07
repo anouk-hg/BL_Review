@@ -1,0 +1,88 @@
+SSV Review Requirements
+Overview
+The SSV (Site Survey) review is a pre-processing step that runs before the existing LU reconciliation workflow. It operates at the address level, and every address in scope must receive exactly one final action as output.
+This workflow will be implemented in FME. The requirements below are written for code generation purposes.
+
+Input Data
+SourceDescriptionBuild List (BL)Existing list of addresses with type (MDU/SDU), bus_number, LU count, DMP Building KeySSV tableSite survey results, already validated. Contains unit count and existence status per addressBelmap polygon layerPolygon layer with polygon ID mappable to building key. Used for spatial context
+
+Data Model Assumptions
+
+Each address has: dmp_building_key, address_id, bus_number (nullable), type (MDU/SDU), lu_count
+Each SSV record has: address_id (or equivalent join key), ssv_unit_count, ssv_status (existing / not_existing / empty)
+Belmap polygon layer has: polygon_id (maps to dmp_building_key), geometry
+A Building Group (BG) is a grouping of MDU/SDU entities — not all MDUs belong to a BG, and a BG with only 1 entity is acceptable
+
+
+Polygon Linkage
+Every address must be linked to a Belmap polygon using the following priority:
+
+Primary: match polygon_id to dmp_building_key
+Fallback: spatial match — point-in-polygon lookup using address location against Belmap geometry
+
+An address that cannot be linked via either method is a data quality issue and should be flagged separately (outside the main action logic).
+
+Final Action Values
+Every address must receive exactly one final action:
+ActionDescriptionKeepNo change neededAddNet new address from SSV, not present in BL, polygon check passedRemoveSSV status = not_existing or emptyModifyType conversion (SDU↔MDU) or LU count adjustment requiredReviewRequires human intervention — routed to a separate team
+
+Business Rules
+1. MDU with 1 LU in BL
+Trigger: address type = MDU AND lu_count = 1
+
+Join to SSV on address
+If ssv_unit_count = 1 → action = Modify, convert to SDU, set bus_number to NULL
+If ssv_unit_count > 1 → action = Modify, keep as MDU, target lu_count = ssv_unit_count (LUs to be added using existing bus_number sequence logic)
+
+
+2. SDU in BL but SSV indicates MDU
+Trigger: address type = SDU AND ssv_unit_count > 1
+
+action = Modify, convert to MDU
+Original SDU address retains its existing bus_number (NULL or otherwise)
+Add new LUs to reach ssv_unit_count, using existing bus_number sequence suggestion logic
+
+
+3. Address in BL, SSV = not existing or empty
+Trigger: address exists in BL AND (ssv_status = not_existing OR ssv_status is empty/null)
+
+action = Remove
+Flagged for removal — goes through normal removal process, not automatic deletion
+
+
+4. Address in SSV but not in BL (net new)
+Trigger: address exists in SSV but has no match in BL
+
+Perform polygon linkage (see Polygon Linkage section)
+Check if other addresses exist in the same polygon
+
+If other addresses exist in same polygon → action = Review, route to separate team
+If no other addresses in polygon → action = Add
+
+
+
+
+5. No change needed
+Trigger: address exists in BL, SSV confirms existing status, no type or count mismatch
+
+action = Keep
+
+
+Output Specification
+One row per address. Minimum output fields:
+FieldDescriptionaddress_idAddress identifierdmp_building_keyBuilding keybus_numberCurrent or updated bus_numbertypeCurrent or updated type (MDU/SDU)lu_count_blLU count from BLlu_count_ssvLU count from SSVfinal_actionOne of: Keep, Add, Remove, Modify, Reviewaction_reasonShort description of why the action was assignedpolygon_idMatched Belmap polygon IDpolygon_match_methodid_match or spatial_match
+
+Scope & Exclusions
+
+SSV data is already validated — treat all SSV records as authoritative, no re-validation needed
+Building Group entity count (1 entity in a BG) is not a trigger — acceptable by design
+Edge case: MDU present in BL but absent from SSV entirely — out of scope for now, to be defined later
+This workflow produces the input state for the LU reconciliation step, which runs after
+
+
+Notes for FME Implementation
+
+SSV table can be read as a standard FME table reader
+Polygon linkage: use PolygonOverlayer or PointOnAreaOverlayer for spatial fallback
+Output should be feature-level (one feature per address)
+final_action and action_reason should be declared as output attributes (varchar) in the relevant transformer
