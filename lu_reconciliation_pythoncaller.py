@@ -593,7 +593,7 @@ def process_group(in_lus, oos_lus, group_key):
 
                 # §6.3 Build REUSE row — carry all original fields
                 reuse_lu = dict(oos_lu)
-                reuse_lu["action"] = "REUSE"
+                reuse_lu["action"] = "REUSED"
 
                 sv15 = oos_lu.get("scopelist_v15")
                 if sv15:
@@ -664,7 +664,7 @@ def process_group(in_lus, oos_lus, group_key):
 _OUTPUT_ATTRS = [
     "MDU_ID", "BG_ID", "house_number", "house_number_extension",
     "jvid", "bus_number", "status", "delivery_status",
-    "action", "feedback",
+    "action", "feedback", "MDU_Total", "BG_Total",
 ]
 
 
@@ -688,6 +688,8 @@ class FeatureProcessor(object):
         lu["MDU_Total"] = _get_attr(feature, "MDU_Total")
         lu["BG_Total"] = _get_attr(feature, "BG_Total")
         lu["Delta"] = _get_attr(feature, "Delta")
+        lu["postal_code"] = _get_attr(feature, "postal_code")
+        lu["street_name"] = _get_attr(feature, "street_name")
 
         if port == "OOS_INPUT":
             self._oos.append(lu)
@@ -707,10 +709,40 @@ class FeatureProcessor(object):
             else:
                 in_scope_by_group[key].append(lu)
 
+        # OOS: index by BG_ID, MDU_ID, and address key
+        def _addr_key_oos(lu):
+            pc = lu.get("postal_code") or ""
+            sn = lu.get("street_name") or ""
+            he = lu.get("house_number_extension") or ""
+            return f"{pc}_{sn}_{he}" if (pc or sn or he) else None
+
+        oos_by_bg = defaultdict(list)
+        oos_by_mdu = defaultdict(list)
+        oos_by_addr = defaultdict(list)
         for lu in self._oos:
-            key = _group_key(lu)
-            if key is not None:
-                oos_by_group[key].append(lu)
+            bg = lu.get("BG_ID")
+            md = lu.get("MDU_ID")
+            ak = _addr_key_oos(lu)
+            if bg:
+                oos_by_bg[bg].append(lu)
+            if md:
+                oos_by_mdu[md].append(lu)
+            if ak:
+                oos_by_addr[ak].append(lu)
+
+        # Build mappings from in-scope features
+        mdu_to_group = {}   # MDU_ID → group key
+        addr_to_group = {}  # address key → group key
+        for lu in self._in_scope:
+            gk = _group_key(lu)
+            if gk is None:
+                continue
+            md = lu.get("MDU_ID")
+            if md:
+                mdu_to_group[md] = gk
+            ak = _addr_key_oos(lu)
+            if ak:
+                addr_to_group[ak] = gk
 
         # §2.3 Ungroupable LUs — pass through as KEEP
         for lu in ungroupable:
@@ -720,18 +752,53 @@ class FeatureProcessor(object):
                 "(BG_ID and MDU_ID both absent)")
             self._emit(lu)
 
+        # Collect OOS per group: BG_ID first, then MDU_ID, then address
+        oos_for_group = defaultdict(list)
+        claimed = set()
+
+        # Tier 1: match by BG_ID
+        for bg, lus in oos_by_bg.items():
+            gk = ("BG", bg)
+            if gk in in_scope_by_group:
+                for lu in lus:
+                    oos_for_group[gk].append(lu)
+                    claimed.add(id(lu))
+
+        # Tier 2: match by MDU_ID
+        for md, lus in oos_by_mdu.items():
+            gk = mdu_to_group.get(md)
+            if gk and gk in in_scope_by_group:
+                for lu in lus:
+                    if id(lu) not in claimed:
+                        oos_for_group[gk].append(lu)
+                        claimed.add(id(lu))
+
+        # Tier 3: match by address key
+        for ak, lus in oos_by_addr.items():
+            gk = addr_to_group.get(ak)
+            if gk and gk in in_scope_by_group:
+                for lu in lus:
+                    if id(lu) not in claimed:
+                        oos_for_group[gk].append(lu)
+                        claimed.add(id(lu))
+
         # Process each group
         for gkey in in_scope_by_group:
             in_lus = in_scope_by_group[gkey]
-            oos_lus = oos_by_group.get(gkey, [])
+            oos_lus = oos_for_group.get(gkey, [])
             results = process_group(in_lus, oos_lus, gkey)
             for lu in results:
                 self._emit(lu)
+
+    _INT_ATTRS = {"MDU_Total", "BG_Total"}
 
     def _emit(self, lu):
         out = fmeobjects.FMEFeature()
         for attr in _OUTPUT_ATTRS:
             val = lu.get(attr)
-            out.setAttribute(
-                attr, str(val) if val is not None else "")
+            if val is not None and attr in self._INT_ATTRS:
+                out.setAttribute(attr, str(_safe_int(val)))
+            else:
+                out.setAttribute(
+                    attr, str(val) if val is not None else "")
         self.pyoutput(out)
