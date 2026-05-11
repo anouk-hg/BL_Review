@@ -691,7 +691,7 @@ class FeatureProcessor(object):
         lu["postal_code"] = _get_attr(feature, "postal_code")
         lu["street_name"] = _get_attr(feature, "street_name")
 
-        if port == "OOS_INPUT":
+        if _get_attr(feature, "in_scope") == "false":
             self._oos.append(lu)
         else:
             self._in_scope.append(lu)
