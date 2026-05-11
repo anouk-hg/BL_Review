@@ -570,6 +570,7 @@ def process_group(in_lus, oos_lus, group_key):
         }
 
         filled = 0
+        used_jvids = set()
 
         # §6.1 Priority 1: OOS with scopelist_v15 populated
         oos_priority = [lu for lu in oos_lus
@@ -582,6 +583,11 @@ def process_group(in_lus, oos_lus, group_key):
             for oos_lu in oos_pool:
                 if filled >= n_add:
                     break
+
+                # Skip if this jvid was already reused
+                oos_jvid = oos_lu.get("jvid") or ""
+                if oos_jvid and oos_jvid in used_jvids:
+                    continue
 
                 # §6.2 Bus number duplicate check
                 oos_bn = oos_lu.get("bus_number") or ""
@@ -614,9 +620,11 @@ def process_group(in_lus, oos_lus, group_key):
 
                 results.append(reuse_lu)
 
-                # Track this bus_number as used
+                # Track this bus_number and jvid as used
                 if oos_bn:
                     in_scope_norms[_normalize_busnum(oos_bn)] = oos_bn
+                if oos_jvid:
+                    used_jvids.add(oos_jvid)
 
                 filled += 1
 
